@@ -381,6 +381,7 @@ static void gen_king(const Pos *p, int from, int white, Move *moves, int *n) {
 
         }
     }
+    //castling
 if (white && from == 4 && p->b[4] == 'K' && !in_check(p, 1)) {
         if (p->castle_wk &&
             p->b[5] == '.' && p->b[6] == '.' && p->b[7] == 'R' &&
