@@ -48,11 +48,11 @@ static void pos_from_fen(Pos *p, const char *fen) {
     strncpy(buf, fen, sizeof(buf)-1);
     buf[sizeof(buf) - 1] = 0;
 
-    char *save = NULL;
-    char *placement = strtok_r(buf, " ", &save);
-    char *stm = strtok_r(NULL, " ", &save);
+    //char *save = NULL;
+    char *placement = strtok_r(buf, " ");
+    char *stm = strtok_r(NULL, " ");
 
-    char *castling = strtok_r(NULL, " ", &save);
+    char *castling = strtok_r(NULL, " ");
 
     if (stm) p->white_to_move = (strcmp(stm, "w") == 0);
 //casltiing
@@ -82,7 +82,7 @@ static void pos_from_fen(Pos *p, const char *fen) {
 }
 
 static void pos_start(Pos *p) {
-    pos_from_fen(p, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1");
+    pos_from_fen(p, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"); //castling added
 }
 
 static int is_white_piece(char c) { return c >= 'A' && c <= 'Z'; }
@@ -181,6 +181,47 @@ static Pos make_move(const Pos *p, Move m) {
                      : (char) tolower((unsigned char) m.promo);
     }
     np.b[m.to] = placed;
+
+    //rook move, castling
+    if (piece == 'K' && m.from == 4 && m.to == 6) {
+    np.b[7] = '.';
+    np.b[5] = 'R';
+} else if (piece == 'K' && m.from == 4 && m.to == 2) {
+    np.b[0] = '.';
+    np.b[3] = 'R';
+} else if (piece == 'k' && m.from == 60 && m.to == 62) {
+    np.b[63] = '.';
+    np.b[61] = 'r';
+} else if (piece == 'k' && m.from == 60 && m.to == 58) {
+    np.b[56] = '.';
+    np.b[59] = 'r';
+}
+    //castling for king
+      if (piece == 'K') {
+      np.castle_wk = 0;
+      np.castle_wq = 0;
+  } else if (piece == 'k') {
+      np.castle_bk = 0;
+      np.castle_bq = 0;
+  }
+
+  //castling for rook
+  if (piece == 'R') {
+      if (m.from == 0) np.castle_wq = 0;
+      if (m.from == 7) np.castle_wk = 0;
+  } else if (piece == 'r') {
+      if (m.from == 56) np.castle_bq = 0;
+      if (m.from == 63) np.castle_bk = 0;
+  }
+        //rook is captured 
+    if (captured == 'R') {
+    if (m.to == 0) np.castle_wq = 0;
+    if (m.to == 7) np.castle_wk = 0;
+} else if (captured == 'r') {
+    if (m.to == 56) np.castle_bq = 0;
+    if (m.to == 63) np.castle_bk = 0;
+}
+    
     np.white_to_move = !p->white_to_move;
     return np;
 }
