@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 
 // Minimal UCI engine: first legal move.
 // No castling, no en-passant; promotions -> queen only.
@@ -49,10 +50,10 @@ static void pos_from_fen(Pos *p, const char *fen) {
     buf[sizeof(buf) - 1] = 0;
 
     //char *save = NULL;
-    char *placement = strtok_r(buf, " ");
-    char *stm = strtok_r(NULL, " ");
+    char *placement = strtok(buf, " ");
+    char *stm = strtok(NULL, " ");
 
-    char *castling = strtok_r(NULL, " ");
+    char *castling = strtok(NULL, " ");
 
     if (stm) p->white_to_move = (strcmp(stm, "w") == 0);
 //casltiing
@@ -172,6 +173,7 @@ static int in_check(const Pos *p, int white_king) {
 
 static Pos make_move(const Pos *p, Move m) {
     Pos np = *p;
+    char captured = p->b[m.to];
     char piece = np.b[m.from];
     np.b[m.from] = '.';
     char placed = piece;
@@ -272,7 +274,7 @@ static void gen_pawn(const Pos *p, int from, int white, Move *moves, int *n) {
         if (target != '.' && is_white_piece(target) != white) {
             if (r == promo_r)
                 for (int i = 0; i < 4; i++){
-                add_move(moves, n, from, onesq, promos[i]);
+                add_move(moves, n, from, to, promos[i]);
             }
             else    
                 add_move(moves, n, from, to, 0);
@@ -499,7 +501,124 @@ static void print_bestmove(Move m) {
     fflush(stdout);
 }
 
+// Standard relative piece values for material evaluation
+#define PAWN_VALUE 100
+#define KNIGHT_VALUE 300
+#define BISHOP_VALUE 300
+#define ROOK_VALUE 500
+#define QUEEN_VALUE 900
+#define KING_VALUE 10000 // Arbitrarily high value for the King
+
+static const int PAWN_PST[64] = {
+     0,  0,  0,  0,  0,  0,  0,  0,
+     5, 10, 10,-20,-20, 10, 10,  5,
+     5, -5,-10,  0,  0,-10, -5,  5,
+     0,  0,  0, 20, 20,  0,  0,  0,
+     5,  5, 10, 25, 25, 10,  5,  5,
+    10, 10, 20, 30, 30, 20, 10, 10,
+    50, 50, 50, 50, 50, 50, 50, 50,
+     0,  0,  0,  0,  0,  0,  0,  0
+};
+
+static const int KNIGHT_PST[64] = {
+    -50,-40,-30,-30,-30,-30,-40,-50,
+    -40,-20,  0,  5,  5,  0,-20,-40,
+    -30,  5, 10, 15, 15, 10,  5,-30,
+    -30,  0, 15, 20, 20, 15,  0,-30,
+    -30,  5, 15, 20, 20, 15,  5,-30,
+    -30,  0, 10, 15, 15, 10,  0,-30,
+    -40,-20,  0,  0,  0,  0,-20,-40,
+    -50,-40,-30,-30,-30,-30,-40,-50
+};
+
+static const int GENERAL_PST[64] = {
+    -20,-10,-10,-10,-10,-10,-10,-20,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -10,  0,  5, 10, 10,  5,  0,-10,
+    -10,  5, 10, 20, 20, 10,  5,-10,
+    -10,  5, 10, 20, 20, 10,  5,-10,
+    -10,  0,  5, 10, 10,  5,  0,-10,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -20,-10,-10,-10,-10,-10,-10,-20
+};
+
+/**
+ * Evaluates the board state based strictly on standard material weights.
+ * Returns a positive score if White is ahead, and a negative score if Black is ahead.
+ */
+static int evaluate(const Pos *p) {
+    int material_score = 0;
+    
+    // Iterate through all 64 squares on the board
+    for (int square_index = 0; square_index < 64; square_index++) {
+        char piece = p->b[square_index];
+        if (piece == '.') continue; // Empty square
+        
+        int piece_value = 0;
+        int pst_val = 0;
+        char normalized_piece = (char)toupper((unsigned char)piece);
+        int is_white = is_white_piece(piece);
+        
+        // Find corresponding square index for PST (flip for black)
+        int pst_index = is_white ? square_index : (56 - (square_index / 8) * 8 + (square_index % 8));
+
+        // Assign value based on piece type
+        if (normalized_piece == 'P') { piece_value = PAWN_VALUE; pst_val = PAWN_PST[pst_index]; }
+        else if (normalized_piece == 'N') { piece_value = KNIGHT_VALUE; pst_val = KNIGHT_PST[pst_index]; }
+        else if (normalized_piece == 'B') { piece_value = BISHOP_VALUE; pst_val = GENERAL_PST[pst_index]; }
+        else if (normalized_piece == 'R') { piece_value = ROOK_VALUE; pst_val = GENERAL_PST[pst_index] / 2; }
+        else if (normalized_piece == 'Q') { piece_value = QUEEN_VALUE; pst_val = GENERAL_PST[pst_index]; }
+        else if (normalized_piece == 'K') { piece_value = KING_VALUE; pst_val = -GENERAL_PST[pst_index]; } // keep king slightly safe
+        
+        // Add to White's score, subtract for Black's score
+        if (is_white) {
+            material_score += piece_value + pst_val;
+        } else {
+            material_score -= (piece_value + pst_val);
+        }
+    }
+    
+    return material_score;
+}
+
+/**
+ * Greedy 1-ply search: Evaluates all immediate legal moves and chooses 
+ * the one that yields the best material score.
+ */
+static Move find_best_move(Pos *p, Move *moves, int num_moves) {
+    // Initialize to worst possible scores based on whose turn it is
+    int best_score = p->white_to_move ? -999999 : 999999;
+    int best_move_index = 0;
+    
+    for (int i = 0; i < num_moves; i++) {
+        // Simulate the move on a temporary board state
+        Pos next_pos = make_move(p, moves[i]);
+        int current_move_score = evaluate(&next_pos) + (rand() % 15);
+        
+        // If it's White's turn, we want to maximize the score
+        if (p->white_to_move) {
+            if (current_move_score > best_score) {
+                best_score = current_move_score;
+                best_move_index = i;
+            }
+        } 
+        // If it's Black's turn, we want to minimize the score (maximize negative score)
+        else {
+            if (current_move_score < best_score) {
+                best_score = current_move_score;
+                best_move_index = i;
+            }
+        }
+    }
+    
+    return moves[best_move_index];
+}
+
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stdin, NULL, _IONBF, 0);
+    srand(time(NULL));
+
     Pos pos;
     pos_start(&pos);
 
@@ -529,7 +648,8 @@ int main(void) {
                 printf("bestmove 0000\n");
                 fflush(stdout);
             } else {
-                print_bestmove(ms[0]);
+                Move best_calculated_move = find_best_move(&pos, ms, n);
+                print_bestmove(best_calculated_move);
             }
         } else if (strcmp(line, "quit") == 0) {
             break;
