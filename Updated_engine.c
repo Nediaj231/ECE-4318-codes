@@ -581,36 +581,159 @@ static int evaluate(const Pos *p) {
     return material_score;
 }
 
+// Search depth for Minimax with Alpha-Beta pruning.
+// Depth 5 exceeds the Java engine's depth of 4, and C's speed makes it feasible.
+#define SEARCH_DEPTH 5
+
 /**
- * Greedy 1-ply search: Evaluates all immediate legal moves and chooses 
- * the one that yields the best material score.
+ * Returns a rough piece value used for MVV-LVA move ordering.
+ */
+static int piece_value_for_ordering(char pc) {
+    switch (toupper((unsigned char)pc)) {
+        case 'P': return 100;
+        case 'N': return 300;
+        case 'B': return 300;
+        case 'R': return 500;
+        case 'Q': return 900;
+        case 'K': return 10000;
+        default:  return 0;
+    }
+}
+
+/**
+ * Simple move ordering: sort captures before quiet moves using MVV-LVA
+ * (Most Valuable Victim – Least Valuable Aggressor).
+ * This dramatically improves alpha-beta pruning efficiency.
+ */
+static void order_moves(const Pos *p, Move *moves, int n) {
+    int scores[256];
+    for (int i = 0; i < n; i++) {
+        char victim  = p->b[moves[i].to];
+        char attacker = p->b[moves[i].from];
+        if (victim != '.') {
+            // MVV-LVA: prioritise capturing high-value pieces with low-value pieces
+            scores[i] = 10000 + piece_value_for_ordering(victim) * 10
+                        - piece_value_for_ordering(attacker);
+        } else {
+            scores[i] = 0;
+        }
+        // Bonus for promotions
+        if (moves[i].promo) scores[i] += 9000;
+    }
+    // Simple insertion sort (fast for small N)
+    for (int i = 1; i < n; i++) {
+        Move key_m = moves[i];
+        int  key_s = scores[i];
+        int j = i - 1;
+        while (j >= 0 && scores[j] < key_s) {
+            moves[j + 1] = moves[j];
+            scores[j + 1] = scores[j];
+            j--;
+        }
+        moves[j + 1] = key_m;
+        scores[j + 1] = key_s;
+    }
+}
+
+/**
+ * Recursive Alpha-Beta search.
+ * @param p          current position
+ * @param depth      remaining depth to search
+ * @param alpha      best score White can guarantee (lower bound)
+ * @param beta       best score Black can guarantee (upper bound)
+ * @param maximizing 1 if it's the maximizing player's turn (White)
+ * @return evaluation score of the position
+ */
+static int alpha_beta(Pos *p, int depth, int alpha, int beta, int maximizing) {
+    // Base case: evaluate leaf node
+    if (depth == 0) {
+        return evaluate(p);
+    }
+
+    Move moves[256];
+    int n = legal_moves(p, moves);
+
+    // No legal moves: checkmate or stalemate
+    if (n == 0) {
+        // If the side to move is in check, it's checkmate
+        if (in_check(p, p->white_to_move)) {
+            // Return a large penalty for the side that got checkmated.
+            // Add depth bonus so the engine prefers faster checkmates.
+            return maximizing ? -100000 + (SEARCH_DEPTH - depth)
+                              :  100000 - (SEARCH_DEPTH - depth);
+        }
+        // Stalemate = draw = 0
+        return 0;
+    }
+
+    // Order moves for better pruning
+    order_moves(p, moves, n);
+
+    if (maximizing) {
+        int max_eval = -999999;
+        for (int i = 0; i < n; i++) {
+            Pos next = make_move(p, moves[i]);
+            int eval = alpha_beta(&next, depth - 1, alpha, beta, 0);
+            if (eval > max_eval) max_eval = eval;
+            if (eval > alpha)    alpha = eval;
+            if (beta <= alpha)   break; // Beta cutoff
+        }
+        return max_eval;
+    } else {
+        int min_eval = 999999;
+        for (int i = 0; i < n; i++) {
+            Pos next = make_move(p, moves[i]);
+            int eval = alpha_beta(&next, depth - 1, alpha, beta, 1);
+            if (eval < min_eval) min_eval = eval;
+            if (eval < beta)     beta = eval;
+            if (beta <= alpha)   break; // Alpha cutoff
+        }
+        return min_eval;
+    }
+}
+
+/**
+ * Minimax with Alpha-Beta Pruning (Depth 5).
+ *
+ * Looks 5 half-moves ahead, simulating "if I move here, then my opponent
+ * moves there, then I respond..." and picks the move that leads to the best
+ * guaranteed outcome assuming the opponent also plays optimally.
+ *
+ * Move ordering (MVV-LVA for captures, promotions first) improves pruning
+ * efficiency by causing more cutoffs earlier in the search.
  */
 static Move find_best_move(Pos *p, Move *moves, int num_moves) {
-    // Initialize to worst possible scores based on whose turn it is
-    int best_score = p->white_to_move ? -999999 : 999999;
+    // Order moves: captures / promotions first for better alpha-beta cutoff
+    order_moves(p, moves, num_moves);
+
     int best_move_index = 0;
-    
-    for (int i = 0; i < num_moves; i++) {
-        // Simulate the move on a temporary board state
-        Pos next_pos = make_move(p, moves[i]);
-        int current_move_score = evaluate(&next_pos) + (rand() % 15);
-        
-        // If it's White's turn, we want to maximize the score
-        if (p->white_to_move) {
-            if (current_move_score > best_score) {
-                best_score = current_move_score;
+    int alpha = -999999;
+    int beta  =  999999;
+
+    if (p->white_to_move) {
+        int best_score = -999999;
+        for (int i = 0; i < num_moves; i++) {
+            Pos next = make_move(p, moves[i]);
+            int score = alpha_beta(&next, SEARCH_DEPTH - 1, alpha, beta, 0);
+            if (score > best_score) {
+                best_score = score;
                 best_move_index = i;
             }
-        } 
-        // If it's Black's turn, we want to minimize the score (maximize negative score)
-        else {
-            if (current_move_score < best_score) {
-                best_score = current_move_score;
+            if (best_score > alpha) alpha = best_score;
+        }
+    } else {
+        int best_score = 999999;
+        for (int i = 0; i < num_moves; i++) {
+            Pos next = make_move(p, moves[i]);
+            int score = alpha_beta(&next, SEARCH_DEPTH - 1, alpha, beta, 1);
+            if (score < best_score) {
+                best_score = score;
                 best_move_index = i;
             }
+            if (best_score < beta) beta = best_score;
         }
     }
-    
+
     return moves[best_move_index];
 }
 
