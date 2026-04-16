@@ -4,7 +4,36 @@
 #include <ctype.h>
 #include <time.h>
 
-#define ENGINE_VERSION "v2.0.0"
+#define ENGINE_VERSION "v2.1.0"
+
+// ============================================================
+// REPETITION DETECTION
+// ============================================================
+// Simple position hash for repetition tracking.
+// We store a lightweight hash of each position played.
+static unsigned long long g_pos_hashes[1024]; // hash of each position in game
+static int g_pos_hash_count = 0;
+
+// Quick hash of a board position (not Zobrist, but sufficient for repetition)
+static unsigned long long compute_pos_hash(const char board[64], int wtm) {
+    unsigned long long h = (unsigned long long)wtm;
+    for (int i = 0; i < 64; i++) {
+        h = h * 1099511628211ULL + (unsigned char)board[i];
+    }
+    return h;
+}
+
+// Check if a position hash has been seen 'threshold' times in game history
+static int is_repetition(unsigned long long hash, int threshold) {
+    int count = 0;
+    for (int i = 0; i < g_pos_hash_count; i++) {
+        if (g_pos_hashes[i] == hash) {
+            count++;
+            if (count >= threshold) return 1;
+        }
+    }
+    return 0;
+}
 
 // ============================================================
 // OPENING BOOK
@@ -848,6 +877,10 @@ static int alpha_beta(Pos *p, int depth, int alpha, int beta,
                       int maximizing, int ply, int do_null) {
     if (depth <= 0) return quiescence(p, alpha, beta, maximizing);
 
+    // Repetition detection inside search: treat repeated positions as draws
+    unsigned long long pos_hash = compute_pos_hash(p->b, p->white_to_move);
+    if (ply > 0 && is_repetition(pos_hash, 1)) return 0; // draw
+
     Move moves[256];
     int n = legal_moves(p, moves);
 
@@ -954,6 +987,16 @@ static Move find_best_move(Pos *p, Move *moves, int num_moves) {
             int best_score = -INF_SCORE;
             for (int i = 0; i < num_moves; i++) {
                 Pos next = make_move(p, moves[i]);
+
+                // Penalize moves that repeat a known position
+                unsigned long long next_hash = compute_pos_hash(next.b, next.white_to_move);
+                if (is_repetition(next_hash, 1)) {
+                    // Treat as slightly worse than a draw to break loops
+                    int score = -10;
+                    if (score > best_score) { best_score = score; best_idx = i; }
+                    continue;
+                }
+
                 int score = alpha_beta(&next, depth - 1, alpha, beta, 0, 1, 1);
                 if (score > best_score) { best_score = score; best_idx = i; }
                 if (score > alpha) alpha = score;
@@ -962,6 +1005,14 @@ static Move find_best_move(Pos *p, Move *moves, int num_moves) {
             int best_score = INF_SCORE;
             for (int i = 0; i < num_moves; i++) {
                 Pos next = make_move(p, moves[i]);
+
+                unsigned long long next_hash = compute_pos_hash(next.b, next.white_to_move);
+                if (is_repetition(next_hash, 1)) {
+                    int score = 10;
+                    if (score < best_score) { best_score = score; best_idx = i; }
+                    continue;
+                }
+
                 int score = alpha_beta(&next, depth - 1, alpha, beta, 1, 1, 1);
                 if (score < best_score) { best_score = score; best_idx = i; }
                 if (score < beta) beta = score;
@@ -1001,6 +1052,7 @@ int main(void) {
         } else if (strcmp(line, "ucinewgame") == 0) {
             pos_start(&pos);
             g_move_count = 0;
+            g_pos_hash_count = 0; // Reset position history for new game
         } else if (strncmp(line, "position", 8) == 0) {
             parse_position(&pos, line);
         } else if (strncmp(line, "go", 2) == 0) {
@@ -1017,6 +1069,11 @@ int main(void) {
                     fflush(stdout);
                 } else {
                     Move best_calculated_move = find_best_move(&pos, ms, n);
+                    // Record the resulting position in history for repetition detection
+                    Pos after = make_move(&pos, best_calculated_move);
+                    if (g_pos_hash_count < 1024) {
+                        g_pos_hashes[g_pos_hash_count++] = compute_pos_hash(after.b, after.white_to_move);
+                    }
                     print_bestmove(best_calculated_move);
                 }
             }
