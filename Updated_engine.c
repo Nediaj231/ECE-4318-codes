@@ -48,8 +48,10 @@ typedef struct { const char *line; const char *reply; } BookEntry;
 // "line" = space-separated UCI moves already played.
 // "reply" = the book move to play next.
 static const BookEntry OPENING_BOOK[] = {
-    // ── White first moves ──
+    // ── White first moves (randomly selected!) ──
     {"",                                        "e2e4"},  // 1. e4 (King's Pawn)
+    {"",                                        "d2d4"},  // 1. d4 (Queen's Pawn)
+    {"",                                        "g1f3"},  // 1. Nf3 (Réti Opening)
 
     // ── Italian Game: 1.e4 e5 2.Nf3 Nc6 3.Bc4 ──
     {"e2e4 e7e5",                                "g1f3"},  // 2. Nf3
@@ -58,6 +60,7 @@ static const BookEntry OPENING_BOOK[] = {
     {"e2e4 e7e5 g1f3 b8c6 f1c4 g8f6",            "d2d3"},  // 4. d3 (Giuoco Pianissimo)
 
     // ── Ruy Lopez: 1.e4 e5 2.Nf3 Nc6 3.Bb5 ──
+    {"e2e4 e7e5 g1f3 b8c6",                      "f1b5"},  // 3. Bb5 (Ruy Lopez alternative)
     {"e2e4 e7e5 g1f3 b8c6 f1b5 a7a6",            "f1a4"},  // 4. Ba4
 
     // ── Sicilian Defense: 1.e4 c5 ──
@@ -77,8 +80,10 @@ static const BookEntry OPENING_BOOK[] = {
     // ── Scandinavian: 1.e4 d5 ──
     {"e2e4 d7d5",                                "e4d5"},  // 2. exd5
 
-    // ── Black responses to 1.e4 ──
+    // ── Black responses to 1.e4 (randomly selected!) ──
     {"e2e4",                                     "e7e5"},  // 1...e5 (classical)
+    {"e2e4",                                     "c7c5"},  // 1...c5 (Sicilian)
+    {"e2e4",                                     "e7e6"},  // 1...e6 (French)
     {"e2e4 e7e5 g1f3",                           "b8c6"},  // 2...Nc6
     {"e2e4 e7e5 g1f3 b8c6 f1b5",                 "a7a6"},  // 3...a6 (Morphy Defense)
     {"e2e4 e7e5 g1f3 b8c6 f1c4",                 "f8c5"},  // 3...Bc5
@@ -87,19 +92,26 @@ static const BookEntry OPENING_BOOK[] = {
     {"d2d4 d7d5",                                "c2c4"},  // 2. c4 (Queen's Gambit)
     {"d2d4 d7d5 c2c4 e7e6",                      "b1c3"},  // 3. Nc3 (QGD)
 
-    // ── London System: 1.d4 ... 2.Bf4 ──
+    // ── London System: 1.d4 Nf6 2.Bf4 ──
     {"d2d4 g8f6",                                "c1f4"},  // 2. Bf4 (London)
+    {"d2d4 g8f6",                                "c2c4"},  // 2. c4 (alternative)
 
-    // ── Black responses to 1.d4 ──
+    // ── Black responses to 1.d4 (randomly selected!) ──
     {"d2d4",                                     "d7d5"},  // 1...d5
+    {"d2d4",                                     "g8f6"},  // 1...Nf6 (Indian Defense)
     {"d2d4 d7d5 c2c4",                           "e7e6"},  // 2...e6 (QGD)
+    {"d2d4 d7d5 c2c4",                           "c7c6"},  // 2...c6 (Slav Defense)
 
-    // ── English Opening: 1.c4 ──
+    // ── Réti / English responses ──
+    {"g1f3",                                     "d7d5"},  // 1...d5
+    {"g1f3",                                     "g8f6"},  // 1...Nf6
     {"c2c4",                                     "e7e5"},  // 1...e5
+    {"c2c4",                                     "g8f6"},  // 1...Nf6
 };
 #define BOOK_SIZE (sizeof(OPENING_BOOK) / sizeof(OPENING_BOOK[0]))
 
 // Build history string and look up in book. Returns 1 if found.
+// If multiple book moves exist for the same position, picks randomly.
 static int book_lookup(char *out_move) {
     // Build current history string
     char history[2048] = "";
@@ -107,14 +119,20 @@ static int book_lookup(char *out_move) {
         if (i > 0) strcat(history, " ");
         strcat(history, g_move_history[i]);
     }
-    // Search for matching entry
+    // Collect all matching entries
+    const char *candidates[16];
+    int num_candidates = 0;
     for (int i = 0; i < (int)BOOK_SIZE; i++) {
         if (strcmp(history, OPENING_BOOK[i].line) == 0) {
-            strcpy(out_move, OPENING_BOOK[i].reply);
-            return 1;
+            if (num_candidates < 16)
+                candidates[num_candidates++] = OPENING_BOOK[i].reply;
         }
     }
-    return 0;
+    if (num_candidates == 0) return 0;
+    // Pick randomly among matches
+    int choice = rand() % num_candidates;
+    strcpy(out_move, candidates[choice]);
+    return 1;
 }
 
 typedef struct {
