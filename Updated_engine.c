@@ -4,9 +4,89 @@
 #include <ctype.h>
 #include <time.h>
 
-// Minimal UCI engine: first legal move.
-// No castling, no en-passant; promotions -> queen only.
-//has included caslting
+#define ENGINE_VERSION "v2.0.0"
+
+// ============================================================
+// OPENING BOOK
+// ============================================================
+// Move history tracking for book lookups
+static char g_move_history[512][6]; // UCI moves played so far
+static int  g_move_count = 0;
+
+typedef struct { const char *line; const char *reply; } BookEntry;
+
+// 24 opening lines covering major chess openings.
+// "line" = space-separated UCI moves already played.
+// "reply" = the book move to play next.
+static const BookEntry OPENING_BOOK[] = {
+    // ── White first moves ──
+    {"",                                        "e2e4"},  // 1. e4 (King's Pawn)
+
+    // ── Italian Game: 1.e4 e5 2.Nf3 Nc6 3.Bc4 ──
+    {"e2e4 e7e5",                                "g1f3"},  // 2. Nf3
+    {"e2e4 e7e5 g1f3 b8c6",                      "f1c4"},  // 3. Bc4 (Italian)
+    {"e2e4 e7e5 g1f3 b8c6 f1c4 f8c5",            "c2c3"},  // 4. c3 (Giuoco Piano)
+    {"e2e4 e7e5 g1f3 b8c6 f1c4 g8f6",            "d2d3"},  // 4. d3 (Giuoco Pianissimo)
+
+    // ── Ruy Lopez: 1.e4 e5 2.Nf3 Nc6 3.Bb5 ──
+    {"e2e4 e7e5 g1f3 b8c6 f1b5 a7a6",            "f1a4"},  // 4. Ba4
+
+    // ── Sicilian Defense: 1.e4 c5 ──
+    {"e2e4 c7c5",                                "g1f3"},  // 2. Nf3 (Open Sicilian)
+    {"e2e4 c7c5 g1f3 d7d6",                      "d2d4"},  // 3. d4
+    {"e2e4 c7c5 g1f3 b8c6",                      "d2d4"},  // 3. d4
+    {"e2e4 c7c5 g1f3 e7e6",                      "d2d4"},  // 3. d4
+
+    // ── French Defense: 1.e4 e6 ──
+    {"e2e4 e7e6",                                "d2d4"},  // 2. d4
+    {"e2e4 e7e6 d2d4 d7d5",                      "b1c3"},  // 3. Nc3 (Classical)
+
+    // ── Caro-Kann: 1.e4 c6 ──
+    {"e2e4 c7c6",                                "d2d4"},  // 2. d4
+    {"e2e4 c7c6 d2d4 d7d5",                      "b1c3"},  // 3. Nc3
+
+    // ── Scandinavian: 1.e4 d5 ──
+    {"e2e4 d7d5",                                "e4d5"},  // 2. exd5
+
+    // ── Black responses to 1.e4 ──
+    {"e2e4",                                     "e7e5"},  // 1...e5 (classical)
+    {"e2e4 e7e5 g1f3",                           "b8c6"},  // 2...Nc6
+    {"e2e4 e7e5 g1f3 b8c6 f1b5",                 "a7a6"},  // 3...a6 (Morphy Defense)
+    {"e2e4 e7e5 g1f3 b8c6 f1c4",                 "f8c5"},  // 3...Bc5
+
+    // ── Queen's Gambit: 1.d4 d5 2.c4 ──
+    {"d2d4 d7d5",                                "c2c4"},  // 2. c4 (Queen's Gambit)
+    {"d2d4 d7d5 c2c4 e7e6",                      "b1c3"},  // 3. Nc3 (QGD)
+
+    // ── London System: 1.d4 ... 2.Bf4 ──
+    {"d2d4 g8f6",                                "c1f4"},  // 2. Bf4 (London)
+
+    // ── Black responses to 1.d4 ──
+    {"d2d4",                                     "d7d5"},  // 1...d5
+    {"d2d4 d7d5 c2c4",                           "e7e6"},  // 2...e6 (QGD)
+
+    // ── English Opening: 1.c4 ──
+    {"c2c4",                                     "e7e5"},  // 1...e5
+};
+#define BOOK_SIZE (sizeof(OPENING_BOOK) / sizeof(OPENING_BOOK[0]))
+
+// Build history string and look up in book. Returns 1 if found.
+static int book_lookup(char *out_move) {
+    // Build current history string
+    char history[2048] = "";
+    for (int i = 0; i < g_move_count; i++) {
+        if (i > 0) strcat(history, " ");
+        strcat(history, g_move_history[i]);
+    }
+    // Search for matching entry
+    for (int i = 0; i < (int)BOOK_SIZE; i++) {
+        if (strcmp(history, OPENING_BOOK[i].line) == 0) {
+            strcpy(out_move, OPENING_BOOK[i].reply);
+            return 1;
+        }
+    }
+    return 0;
+}
 
 typedef struct {
     int from, to;
@@ -472,6 +552,7 @@ static void parse_position(Pos *p, const char *line) {
     }
 
     int i = 1;
+    g_move_count = 0; // Reset move history
     if (i < nt && strcmp(toks[i], "startpos") == 0) {
         pos_start(p);
         i++;
@@ -488,7 +569,15 @@ static void parse_position(Pos *p, const char *line) {
 
     if (i < nt && strcmp(toks[i], "moves") == 0) {
         i++;
-        for (; i < nt; i++) apply_uci_move(p, toks[i]);
+        for (; i < nt; i++) {
+            // Record move in history for opening book
+            if (g_move_count < 512) {
+                strncpy(g_move_history[g_move_count], toks[i], 5);
+                g_move_history[g_move_count][5] = 0;
+                g_move_count++;
+            }
+            apply_uci_move(p, toks[i]);
+        }
     }
 }
 
@@ -543,199 +632,348 @@ static const int GENERAL_PST[64] = {
 };
 
 /**
- * Evaluates the board state based strictly on standard material weights.
- * Returns a positive score if White is ahead, and a negative score if Black is ahead.
+ * Enhanced evaluation: material + PST + pawn structure + bishop pair +
+ * rook on open file + king safety.
  */
 static int evaluate(const Pos *p) {
-    int material_score = 0;
-    
-    // Iterate through all 64 squares on the board
-    for (int square_index = 0; square_index < 64; square_index++) {
-        char piece = p->b[square_index];
-        if (piece == '.') continue; // Empty square
-        
-        int piece_value = 0;
-        int pst_val = 0;
-        char normalized_piece = (char)toupper((unsigned char)piece);
-        int is_white = is_white_piece(piece);
-        
-        // Find corresponding square index for PST (flip for black)
-        int pst_index = is_white ? square_index : (56 - (square_index / 8) * 8 + (square_index % 8));
+    int score = 0;
+    int white_bishops = 0, black_bishops = 0;
+    int white_pawns_on_file[8] = {0}, black_pawns_on_file[8] = {0};
+    int white_pawn_present[8] = {0}, black_pawn_present[8] = {0};
+    int wk_sq = -1, bk_sq = -1;
 
-        // Assign value based on piece type
-        if (normalized_piece == 'P') { piece_value = PAWN_VALUE; pst_val = PAWN_PST[pst_index]; }
-        else if (normalized_piece == 'N') { piece_value = KNIGHT_VALUE; pst_val = KNIGHT_PST[pst_index]; }
-        else if (normalized_piece == 'B') { piece_value = BISHOP_VALUE; pst_val = GENERAL_PST[pst_index]; }
-        else if (normalized_piece == 'R') { piece_value = ROOK_VALUE; pst_val = GENERAL_PST[pst_index] / 2; }
-        else if (normalized_piece == 'Q') { piece_value = QUEEN_VALUE; pst_val = GENERAL_PST[pst_index]; }
-        else if (normalized_piece == 'K') { piece_value = KING_VALUE; pst_val = -GENERAL_PST[pst_index]; } // keep king slightly safe
-        
-        // Add to White's score, subtract for Black's score
-        if (is_white) {
-            material_score += piece_value + pst_val;
-        } else {
-            material_score -= (piece_value + pst_val);
+    // First pass: material + PST + count pieces
+    for (int sq = 0; sq < 64; sq++) {
+        char piece = p->b[sq];
+        if (piece == '.') continue;
+        int is_white = is_white_piece(piece);
+        char up = (char)toupper((unsigned char)piece);
+        int pst_idx = is_white ? sq : (56 - (sq / 8) * 8 + (sq % 8));
+        int val = 0, pst = 0;
+        int file = sq % 8;
+
+        if (up == 'P') {
+            val = PAWN_VALUE; pst = PAWN_PST[pst_idx];
+            if (is_white) { white_pawns_on_file[file]++; white_pawn_present[file] = 1; }
+            else          { black_pawns_on_file[file]++; black_pawn_present[file] = 1; }
+        }
+        else if (up == 'N') { val = KNIGHT_VALUE; pst = KNIGHT_PST[pst_idx]; }
+        else if (up == 'B') {
+            val = BISHOP_VALUE; pst = GENERAL_PST[pst_idx];
+            if (is_white) white_bishops++; else black_bishops++;
+        }
+        else if (up == 'R') { val = ROOK_VALUE; pst = GENERAL_PST[pst_idx] / 2; }
+        else if (up == 'Q') { val = QUEEN_VALUE; pst = GENERAL_PST[pst_idx]; }
+        else if (up == 'K') {
+            val = KING_VALUE; pst = -GENERAL_PST[pst_idx];
+            if (is_white) wk_sq = sq; else bk_sq = sq;
+        }
+
+        if (is_white) score += val + pst;
+        else          score -= (val + pst);
+    }
+
+    // Bishop pair bonus
+    if (white_bishops >= 2) score += 50;
+    if (black_bishops >= 2) score -= 50;
+
+    // Pawn structure
+    for (int f = 0; f < 8; f++) {
+        // Doubled pawns penalty
+        if (white_pawns_on_file[f] > 1) score -= 20 * (white_pawns_on_file[f] - 1);
+        if (black_pawns_on_file[f] > 1) score += 20 * (black_pawns_on_file[f] - 1);
+        // Isolated pawns penalty
+        int wn = (f > 0 ? white_pawn_present[f-1] : 0) + (f < 7 ? white_pawn_present[f+1] : 0);
+        int bn = (f > 0 ? black_pawn_present[f-1] : 0) + (f < 7 ? black_pawn_present[f+1] : 0);
+        if (white_pawn_present[f] && wn == 0) score -= 15;
+        if (black_pawn_present[f] && bn == 0) score += 15;
+    }
+
+    // Rook on open/semi-open file
+    for (int sq = 0; sq < 64; sq++) {
+        char pc = p->b[sq];
+        if (pc == 'R' || pc == 'r') {
+            int f = sq % 8;
+            int is_w = (pc == 'R');
+            int own_pawns = is_w ? white_pawns_on_file[f] : black_pawns_on_file[f];
+            int opp_pawns = is_w ? black_pawns_on_file[f] : white_pawns_on_file[f];
+            int bonus = 0;
+            if (own_pawns == 0 && opp_pawns == 0) bonus = 25; // open file
+            else if (own_pawns == 0) bonus = 15; // semi-open
+            if (is_w) score += bonus; else score -= bonus;
         }
     }
-    
-    return material_score;
+
+    // King safety: bonus for pawn shield
+    if (wk_sq >= 0) {
+        int kf = wk_sq % 8, kr = wk_sq / 8;
+        int shield = 0;
+        for (int df = -1; df <= 1; df++) {
+            int sf = kf + df;
+            if (sf < 0 || sf > 7) continue;
+            if (kr + 1 < 8 && p->b[(kr+1)*8+sf] == 'P') shield++;
+        }
+        score += shield * 10;
+    }
+    if (bk_sq >= 0) {
+        int kf = bk_sq % 8, kr = bk_sq / 8;
+        int shield = 0;
+        for (int df = -1; df <= 1; df++) {
+            int sf = kf + df;
+            if (sf < 0 || sf > 7) continue;
+            if (kr - 1 >= 0 && p->b[(kr-1)*8+sf] == 'p') shield++;
+        }
+        score -= shield * 10;
+    }
+
+    return score;
 }
 
-// Search depth for Minimax with Alpha-Beta pruning.
-// Depth 5 exceeds the Java engine's depth of 4, and C's speed makes it feasible.
-#define SEARCH_DEPTH 5
+// Generate only legal captures and promotions (for quiescence search)
+static int legal_captures(const Pos *p, Move *out) {
+    Move tmp[256];
+    int pn = pseudo_legal_moves(p, tmp);
+    int n = 0;
+    for (int i = 0; i < pn; i++) {
+        if (p->b[tmp[i].to] == '.' && !tmp[i].promo) continue; // skip quiet moves
+        Pos np = make_move(p, tmp[i]);
+        if (!in_check(&np, !np.white_to_move)) {
+            out[n++] = tmp[i];
+        }
+    }
+    return n;
+}
 
-/**
- * Returns a rough piece value used for MVV-LVA move ordering.
- */
+// ============================================================
+// SEARCH ENGINE v2.0
+// ============================================================
+#define MAX_DEPTH 64
+#define DEFAULT_DEPTH 7
+#define MATE_SCORE 100000
+#define INF_SCORE 999999
+#define NULL_MOVE_R 2
+
+// Killer moves: 2 per ply
+static Move killers[MAX_DEPTH][2];
+
+// History heuristic table [from][to]
+static int history_table[64][64];
+
 static int piece_value_for_ordering(char pc) {
     switch (toupper((unsigned char)pc)) {
-        case 'P': return 100;
-        case 'N': return 350;
-        case 'B': return 350;
-        case 'R': return 525;
-        case 'Q': return 1000;
-        case 'K': return 10000;
+        case 'P': return 100;  case 'N': return 300;
+        case 'B': return 300;  case 'R': return 500;
+        case 'Q': return 900;  case 'K': return 10000;
         default:  return 0;
     }
 }
 
-/**
- * Simple move ordering: sort captures before quiet moves using MVV-LVA
- * (Most Valuable Victim – Least Valuable Aggressor).
- * This dramatically improves alpha-beta pruning efficiency.
- */
-static void order_moves(const Pos *p, Move *moves, int n) {
+static int is_killer(Move m, int ply) {
+    return (killers[ply][0].from == m.from && killers[ply][0].to == m.to) ||
+           (killers[ply][1].from == m.from && killers[ply][1].to == m.to);
+}
+
+static void store_killer(Move m, int ply) {
+    if (killers[ply][0].from != m.from || killers[ply][0].to != m.to) {
+        killers[ply][1] = killers[ply][0];
+        killers[ply][0] = m;
+    }
+}
+
+static void order_moves(const Pos *p, Move *moves, int n, int ply) {
     int scores[256];
     for (int i = 0; i < n; i++) {
-        char victim  = p->b[moves[i].to];
-        char attacker = p->b[moves[i].from];
+        char victim = p->b[moves[i].to];
         if (victim != '.') {
-            // MVV-LVA: prioritise capturing high-value pieces with low-value pieces
-            scores[i] = 10000 + piece_value_for_ordering(victim) * 10
-                        - piece_value_for_ordering(attacker);
+            scores[i] = 20000 + piece_value_for_ordering(victim) * 10
+                        - piece_value_for_ordering(p->b[moves[i].from]);
+        } else if (is_killer(moves[i], ply)) {
+            scores[i] = 9000;
         } else {
-            scores[i] = 0;
+            scores[i] = history_table[moves[i].from][moves[i].to];
         }
-        // Bonus for promotions
-        if (moves[i].promo) scores[i] += 9000;
+        if (moves[i].promo) scores[i] += 19000;
     }
-    // Simple insertion sort (fast for small N)
     for (int i = 1; i < n; i++) {
-        Move key_m = moves[i];
-        int  key_s = scores[i];
-        int j = i - 1;
-        while (j >= 0 && scores[j] < key_s) {
-            moves[j + 1] = moves[j];
-            scores[j + 1] = scores[j];
-            j--;
+        Move km = moves[i]; int ks = scores[i]; int j = i - 1;
+        while (j >= 0 && scores[j] < ks) {
+            moves[j+1] = moves[j]; scores[j+1] = scores[j]; j--;
         }
-        moves[j + 1] = key_m;
-        scores[j + 1] = key_s;
+        moves[j+1] = km; scores[j+1] = ks;
     }
 }
 
 /**
- * Recursive Alpha-Beta search.
- * @param p          current position
- * @param depth      remaining depth to search
- * @param alpha      best score White can guarantee (lower bound)
- * @param beta       best score Black can guarantee (upper bound)
- * @param maximizing 1 if it's the maximizing player's turn (White)
- * @return evaluation score of the position
+ * Quiescence Search: extends search at leaf nodes by evaluating
+ * all captures until the position is "quiet". Eliminates the
+ * horizon effect (e.g. not seeing a recapture).
  */
-static int alpha_beta(Pos *p, int depth, int alpha, int beta, int maximizing) {
-    // Base case: evaluate leaf node
-    if (depth == 0) {
-        return evaluate(p);
+static int quiescence(Pos *p, int alpha, int beta, int maximizing) {
+    int stand_pat = evaluate(p);
+
+    if (maximizing) {
+        if (stand_pat >= beta) return beta;
+        if (stand_pat > alpha) alpha = stand_pat;
+        Move caps[256];
+        int n = legal_captures(p, caps);
+        order_moves(p, caps, n, 0);
+        for (int i = 0; i < n; i++) {
+            Pos next = make_move(p, caps[i]);
+            int score = quiescence(&next, alpha, beta, 0);
+            if (score > alpha) alpha = score;
+            if (alpha >= beta) return beta;
+        }
+        return alpha;
+    } else {
+        if (stand_pat <= alpha) return alpha;
+        if (stand_pat < beta) beta = stand_pat;
+        Move caps[256];
+        int n = legal_captures(p, caps);
+        order_moves(p, caps, n, 0);
+        for (int i = 0; i < n; i++) {
+            Pos next = make_move(p, caps[i]);
+            int score = quiescence(&next, alpha, beta, 1);
+            if (score < beta) beta = score;
+            if (alpha >= beta) return alpha;
+        }
+        return beta;
     }
+}
+
+/**
+ * Alpha-Beta with Null Move Pruning, Killer Moves, LMR, and
+ * Quiescence Search at leaf nodes.
+ */
+static int alpha_beta(Pos *p, int depth, int alpha, int beta,
+                      int maximizing, int ply, int do_null) {
+    if (depth <= 0) return quiescence(p, alpha, beta, maximizing);
 
     Move moves[256];
     int n = legal_moves(p, moves);
 
-    // No legal moves: checkmate or stalemate
     if (n == 0) {
-        // If the side to move is in check, it's checkmate
-        if (in_check(p, p->white_to_move)) {
-            // Return a large penalty for the side that got checkmated.
-            // Add depth bonus so the engine prefers faster checkmates.
-            return maximizing ? -100000 + (SEARCH_DEPTH - depth)
-                              :  100000 - (SEARCH_DEPTH - depth);
-        }
-        // Stalemate = draw = 0
-        return 0;
+        if (in_check(p, p->white_to_move))
+            return maximizing ? -MATE_SCORE + ply : MATE_SCORE - ply;
+        return 0; // stalemate
     }
 
-    // Order moves for better pruning
-    order_moves(p, moves, n);
+    // Null Move Pruning: skip our turn at reduced depth
+    if (do_null && depth >= 3 && !in_check(p, p->white_to_move)) {
+        Pos null_pos = *p;
+        null_pos.white_to_move = !null_pos.white_to_move;
+        int null_score = alpha_beta(&null_pos, depth - 1 - NULL_MOVE_R,
+                                    alpha, beta, !maximizing, ply + 1, 0);
+        if (maximizing && null_score >= beta) return beta;
+        if (!maximizing && null_score <= alpha) return alpha;
+    }
+
+    order_moves(p, moves, n, ply);
 
     if (maximizing) {
-        int max_eval = -999999;
+        int best = -INF_SCORE;
         for (int i = 0; i < n; i++) {
+            int rdepth = depth - 1;
+            // LMR: reduce depth for late quiet moves
+            if (i >= 4 && depth >= 3 && p->b[moves[i].to] == '.' && !moves[i].promo)
+                rdepth--;
+
             Pos next = make_move(p, moves[i]);
-            int eval = alpha_beta(&next, depth - 1, alpha, beta, 0);
-            if (eval > max_eval) max_eval = eval;
-            if (eval > alpha)    alpha = eval;
-            if (beta <= alpha)   break; // Beta cutoff
+            int score = alpha_beta(&next, rdepth, alpha, beta, 0, ply + 1, 1);
+
+            // Re-search at full depth if LMR found something good
+            if (rdepth < depth - 1 && score > alpha)
+                score = alpha_beta(&next, depth - 1, alpha, beta, 0, ply + 1, 1);
+
+            if (score > best) best = score;
+            if (score > alpha) alpha = score;
+            if (alpha >= beta) {
+                if (p->b[moves[i].to] == '.') {
+                    store_killer(moves[i], ply);
+                    history_table[moves[i].from][moves[i].to] += depth * depth;
+                }
+                break;
+            }
         }
-        return max_eval;
+        return best;
     } else {
-        int min_eval = 999999;
+        int best = INF_SCORE;
         for (int i = 0; i < n; i++) {
+            int rdepth = depth - 1;
+            if (i >= 4 && depth >= 3 && p->b[moves[i].to] == '.' && !moves[i].promo)
+                rdepth--;
+
             Pos next = make_move(p, moves[i]);
-            int eval = alpha_beta(&next, depth - 1, alpha, beta, 1);
-            if (eval < min_eval) min_eval = eval;
-            if (eval < beta)     beta = eval;
-            if (beta <= alpha)   break; // Alpha cutoff
+            int score = alpha_beta(&next, rdepth, alpha, beta, 1, ply + 1, 1);
+
+            if (rdepth < depth - 1 && score < beta)
+                score = alpha_beta(&next, depth - 1, alpha, beta, 1, ply + 1, 1);
+
+            if (score < best) best = score;
+            if (score < beta) beta = score;
+            if (alpha >= beta) {
+                if (p->b[moves[i].to] == '.') {
+                    store_killer(moves[i], ply);
+                    history_table[moves[i].from][moves[i].to] += depth * depth;
+                }
+                break;
+            }
         }
-        return min_eval;
+        return best;
     }
 }
 
 /**
- * Minimax with Alpha-Beta Pruning (Depth 5).
- *
- * Looks 5 half-moves ahead, simulating "if I move here, then my opponent
- * moves there, then I respond..." and picks the move that leads to the best
- * guaranteed outcome assuming the opponent also plays optimally.
- *
- * Move ordering (MVV-LVA for captures, promotions first) improves pruning
- * efficiency by causing more cutoffs earlier in the search.
+ * Iterative Deepening: search depth 1, then 2, ... up to DEFAULT_DEPTH.
+ * Best move from previous depth improves ordering at the next depth.
  */
 static Move find_best_move(Pos *p, Move *moves, int num_moves) {
-    // Order moves: captures / promotions first for better alpha-beta cutoff
-    order_moves(p, moves, num_moves);
+    // Clear killer and history tables
+    memset(killers, 0, sizeof(killers));
+    memset(history_table, 0, sizeof(history_table));
 
-    int best_move_index = 0;
-    int alpha = -999999;
-    int beta  =  999999;
+    Move best_move = moves[0];
 
-    if (p->white_to_move) {
-        int best_score = -999999;
-        for (int i = 0; i < num_moves; i++) {
-            Pos next = make_move(p, moves[i]);
-            int score = alpha_beta(&next, SEARCH_DEPTH - 1, alpha, beta, 0);
-            if (score > best_score) {
-                best_score = score;
-                best_move_index = i;
+    for (int depth = 1; depth <= DEFAULT_DEPTH; depth++) {
+        order_moves(p, moves, num_moves, 0);
+
+        // Put previous iteration's best move first
+        if (depth > 1) {
+            for (int i = 1; i < num_moves; i++) {
+                if (moves[i].from == best_move.from && moves[i].to == best_move.to
+                    && moves[i].promo == best_move.promo) {
+                    Move tmp = moves[0]; moves[0] = moves[i]; moves[i] = tmp;
+                    break;
+                }
             }
-            if (best_score > alpha) alpha = best_score;
         }
-    } else {
-        int best_score = 999999;
-        for (int i = 0; i < num_moves; i++) {
-            Pos next = make_move(p, moves[i]);
-            int score = alpha_beta(&next, SEARCH_DEPTH - 1, alpha, beta, 1);
-            if (score < best_score) {
-                best_score = score;
-                best_move_index = i;
+
+        int alpha = -INF_SCORE, beta = INF_SCORE;
+        int best_idx = 0;
+
+        if (p->white_to_move) {
+            int best_score = -INF_SCORE;
+            for (int i = 0; i < num_moves; i++) {
+                Pos next = make_move(p, moves[i]);
+                int score = alpha_beta(&next, depth - 1, alpha, beta, 0, 1, 1);
+                if (score > best_score) { best_score = score; best_idx = i; }
+                if (score > alpha) alpha = score;
             }
-            if (best_score < beta) beta = best_score;
+        } else {
+            int best_score = INF_SCORE;
+            for (int i = 0; i < num_moves; i++) {
+                Pos next = make_move(p, moves[i]);
+                int score = alpha_beta(&next, depth - 1, alpha, beta, 1, 1, 1);
+                if (score < best_score) { best_score = score; best_idx = i; }
+                if (score < beta) beta = score;
+            }
         }
+
+        best_move = moves[best_idx];
     }
 
-    return moves[best_move_index];
+    return best_move;
 }
+
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -753,7 +991,7 @@ int main(void) {
         if (!len) continue;
 
         if (strcmp(line, "uci") == 0) {
-            printf("id name team_c\n");
+            printf("id name team_c %s\n", ENGINE_VERSION);
             printf("id author team_c_bryan\n");
             printf("uciok\n");
             fflush(stdout);
@@ -762,17 +1000,25 @@ int main(void) {
             fflush(stdout);
         } else if (strcmp(line, "ucinewgame") == 0) {
             pos_start(&pos);
+            g_move_count = 0;
         } else if (strncmp(line, "position", 8) == 0) {
             parse_position(&pos, line);
         } else if (strncmp(line, "go", 2) == 0) {
-            Move ms[256];
-            int n = legal_moves(&pos, ms);
-            if (n <= 0) {
-                printf("bestmove 0000\n");
+            // Check opening book first
+            char book_move[8];
+            if (book_lookup(book_move)) {
+                printf("bestmove %s\n", book_move);
                 fflush(stdout);
             } else {
-                Move best_calculated_move = find_best_move(&pos, ms, n);
-                print_bestmove(best_calculated_move);
+                Move ms[256];
+                int n = legal_moves(&pos, ms);
+                if (n <= 0) {
+                    printf("bestmove 0000\n");
+                    fflush(stdout);
+                } else {
+                    Move best_calculated_move = find_best_move(&pos, ms, n);
+                    print_bestmove(best_calculated_move);
+                }
             }
         } else if (strcmp(line, "quit") == 0) {
             break;
