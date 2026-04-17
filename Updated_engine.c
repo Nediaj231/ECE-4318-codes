@@ -855,8 +855,9 @@ static void order_moves(const Pos *p, Move *moves, int n, int ply) {
  * all captures until the position is "quiet". Eliminates the
  * horizon effect (e.g. not seeing a recapture).
  */
-static int quiescence(Pos *p, int alpha, int beta, int maximizing) {
+static int quiescence(Pos *p, int alpha, int beta) {
     int stand_pat = evaluate(p);
+    int maximizing = p->white_to_move;
 
     if (maximizing) {
         if (stand_pat >= beta) return beta;
@@ -866,7 +867,7 @@ static int quiescence(Pos *p, int alpha, int beta, int maximizing) {
         order_moves(p, caps, n, 0);
         for (int i = 0; i < n; i++) {
             Pos next = make_move(p, caps[i]);
-            int score = quiescence(&next, alpha, beta, 0);
+            int score = quiescence(&next, alpha, beta);
             if (score > alpha) alpha = score;
             if (alpha >= beta) return beta;
         }
@@ -879,7 +880,7 @@ static int quiescence(Pos *p, int alpha, int beta, int maximizing) {
         order_moves(p, caps, n, 0);
         for (int i = 0; i < n; i++) {
             Pos next = make_move(p, caps[i]);
-            int score = quiescence(&next, alpha, beta, 1);
+            int score = quiescence(&next, alpha, beta);
             if (score < beta) beta = score;
             if (alpha >= beta) return alpha;
         }
@@ -892,8 +893,10 @@ static int quiescence(Pos *p, int alpha, int beta, int maximizing) {
  * Quiescence Search at leaf nodes.
  */
 static int alpha_beta(Pos *p, int depth, int alpha, int beta,
-                      int maximizing, int ply, int do_null) {
-    if (depth <= 0) return quiescence(p, alpha, beta, maximizing);
+                      int ply, int do_null) {
+    if (depth <= 0) return quiescence(p, alpha, beta);
+
+    int maximizing = p->white_to_move;
 
     // Repetition detection inside search: treat repeated positions as draws
     unsigned long long pos_hash = compute_pos_hash(p->b, p->white_to_move);
@@ -913,7 +916,7 @@ static int alpha_beta(Pos *p, int depth, int alpha, int beta,
         Pos null_pos = *p;
         null_pos.white_to_move = !null_pos.white_to_move;
         int null_score = alpha_beta(&null_pos, depth - 1 - NULL_MOVE_R,
-                                    alpha, beta, !maximizing, ply + 1, 0);
+                                    alpha, beta, ply + 1, 0);
         if (maximizing && null_score >= beta) return beta;
         if (!maximizing && null_score <= alpha) return alpha;
     }
@@ -929,11 +932,11 @@ static int alpha_beta(Pos *p, int depth, int alpha, int beta,
                 rdepth--;
 
             Pos next = make_move(p, moves[i]);
-            int score = alpha_beta(&next, rdepth, alpha, beta, 0, ply + 1, 1);
+            int score = alpha_beta(&next, rdepth, alpha, beta, ply + 1, 1);
 
             // Re-search at full depth if LMR found something good
             if (rdepth < depth - 1 && score > alpha)
-                score = alpha_beta(&next, depth - 1, alpha, beta, 0, ply + 1, 1);
+                score = alpha_beta(&next, depth - 1, alpha, beta, ply + 1, 1);
 
             if (score > best) best = score;
             if (score > alpha) alpha = score;
@@ -954,10 +957,10 @@ static int alpha_beta(Pos *p, int depth, int alpha, int beta,
                 rdepth--;
 
             Pos next = make_move(p, moves[i]);
-            int score = alpha_beta(&next, rdepth, alpha, beta, 1, ply + 1, 1);
+            int score = alpha_beta(&next, rdepth, alpha, beta, ply + 1, 1);
 
             if (rdepth < depth - 1 && score < beta)
-                score = alpha_beta(&next, depth - 1, alpha, beta, 1, ply + 1, 1);
+                score = alpha_beta(&next, depth - 1, alpha, beta, ply + 1, 1);
 
             if (score < best) best = score;
             if (score < beta) beta = score;
@@ -1015,7 +1018,7 @@ static Move find_best_move(Pos *p, Move *moves, int num_moves) {
                     continue;
                 }
 
-                int score = alpha_beta(&next, depth - 1, alpha, beta, 0, 1, 1);
+                int score = alpha_beta(&next, depth - 1, alpha, beta, 1, 1);
                 if (score > best_score) { best_score = score; best_idx = i; }
                 if (score > alpha) alpha = score;
             }
@@ -1031,7 +1034,7 @@ static Move find_best_move(Pos *p, Move *moves, int num_moves) {
                     continue;
                 }
 
-                int score = alpha_beta(&next, depth - 1, alpha, beta, 1, 1, 1);
+                int score = alpha_beta(&next, depth - 1, alpha, beta, 1, 1);
                 if (score < best_score) { best_score = score; best_idx = i; }
                 if (score < beta) beta = score;
             }
