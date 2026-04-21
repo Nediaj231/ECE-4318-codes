@@ -61,7 +61,7 @@ static const BookEntry OPENING_BOOK[] = {
 
     // ── Ruy Lopez: 1.e4 e5 2.Nf3 Nc6 3.Bb5 ──
     {"e2e4 e7e5 g1f3 b8c6",                      "f1b5"},  // 3. Bb5 (Ruy Lopez alternative)
-    {"e2e4 e7e5 g1f3 b8c6 f1b5 a7a6",            "f1a4"},  // 4. Ba4
+    {"e2e4 e7e5 g1f3 b8c6 f1b5 a7a6",            "b5a4"},  // 4. Ba4
 
     // ── Sicilian Defense: 1.e4 c5 ──
     {"e2e4 c7c5",                                "g1f3"},  // 2. Nf3 (Open Sicilian)
