@@ -15,8 +15,9 @@ static unsigned long long g_pos_hashes[1024]; // hash of each position in game
 static int g_pos_hash_count = 0;
 
 // Quick hash of a board position (not Zobrist, but sufficient for repetition)
-static unsigned long long compute_pos_hash(const char board[64], int wtm) {
+static unsigned long long compute_pos_hash(const char board[64], int wtm, int castle_bits) {
     unsigned long long h = (unsigned long long)wtm;
+    h = h * 1099511628211ULL + (unsigned char)castle_bits;
     for (int i = 0; i < 64; i++) {
         h = h * 1099511628211ULL + (unsigned char)board[i];
     }
@@ -369,13 +370,12 @@ static void gen_pawn(const Pos *p, int from, int white, Move *moves, int *n) {
     int promo_r = white ? 7 : 0;
 
     int onesq = (r + dir) * 8 + f;
-    int twosq = (r + 2 * dir) * 8 + f;
 
     char promos[4] = {'q', 'r', 'b', 'n'};
 
     // Moving forward
     if (r + dir >= 0 && r + dir < 8 && p->b[onesq] == '.') {
-        if (r == promo_r)
+        if (r + dir == promo_r)
             for (int i = 0; i < 4; i++){
                 add_move(moves, n, from, onesq, promos[i]);
             }
@@ -399,7 +399,7 @@ static void gen_pawn(const Pos *p, int from, int white, Move *moves, int *n) {
         int to = cr * 8 + cf;
         char target = p->b[to];
         if (target != '.' && is_white_piece(target) != white) {
-            if (r == promo_r)
+            if (cr == promo_r)
                 for (int i = 0; i < 4; i++){
                 add_move(moves, n, from, to, promos[i]);
             }
@@ -600,6 +600,7 @@ static void parse_position(Pos *p, const char *line) {
 
     int i = 1;
     g_move_count = 0; // Reset move history
+    g_pos_hash_count = 0; // Reset position hashes for repetition detection
     if (i < nt && strcmp(toks[i], "startpos") == 0) {
         pos_start(p);
         i++;
@@ -624,6 +625,11 @@ static void parse_position(Pos *p, const char *line) {
                 g_move_count++;
             }
             apply_uci_move(p, toks[i]);
+            // Track all positions for repetition detection
+            if (g_pos_hash_count < 1024) {
+                g_pos_hashes[g_pos_hash_count++] = compute_pos_hash(p->b, p->white_to_move,
+                    p->castle_wk | (p->castle_wq << 1) | (p->castle_bk << 2) | (p->castle_bq << 3));
+            }
         }
     }
 }
@@ -899,8 +905,9 @@ static int alpha_beta(Pos *p, int depth, int alpha, int beta,
     int maximizing = p->white_to_move;
 
     // Repetition detection inside search: treat repeated positions as draws
-    unsigned long long pos_hash = compute_pos_hash(p->b, p->white_to_move);
-    if (ply > 0 && is_repetition(pos_hash, 1)) return 0; // draw
+    unsigned long long ph = compute_pos_hash(p->b, p->white_to_move,
+        p->castle_wk | (p->castle_wq << 1) | (p->castle_bk << 2) | (p->castle_bq << 3));
+    if (ply > 0 && is_repetition(ph, 1)) return 0; // draw
 
     Move moves[256];
     int n = legal_moves(p, moves);
@@ -1010,7 +1017,8 @@ static Move find_best_move(Pos *p, Move *moves, int num_moves) {
                 Pos next = make_move(p, moves[i]);
 
                 // Penalize moves that repeat a known position
-                unsigned long long next_hash = compute_pos_hash(next.b, next.white_to_move);
+                unsigned long long next_hash = compute_pos_hash(next.b, next.white_to_move,
+                    next.castle_wk | (next.castle_wq << 1) | (next.castle_bk << 2) | (next.castle_bq << 3));
                 if (is_repetition(next_hash, 1)) {
                     // Treat as slightly worse than a draw to break loops
                     int score = -10;
@@ -1027,7 +1035,8 @@ static Move find_best_move(Pos *p, Move *moves, int num_moves) {
             for (int i = 0; i < num_moves; i++) {
                 Pos next = make_move(p, moves[i]);
 
-                unsigned long long next_hash = compute_pos_hash(next.b, next.white_to_move);
+                unsigned long long next_hash = compute_pos_hash(next.b, next.white_to_move,
+                    next.castle_wk | (next.castle_wq << 1) | (next.castle_bk << 2) | (next.castle_bq << 3));
                 if (is_repetition(next_hash, 1)) {
                     int score = 10;
                     if (score < best_score) { best_score = score; best_idx = i; }
@@ -1080,6 +1089,13 @@ int main(void) {
             // Check opening book first
             char book_move[8];
             if (book_lookup(book_move)) {
+                // Track book move position for repetition detection
+                Pos book_pos = pos;
+                apply_uci_move(&book_pos, book_move);
+                if (g_pos_hash_count < 1024) {
+                    g_pos_hashes[g_pos_hash_count++] = compute_pos_hash(book_pos.b, book_pos.white_to_move,
+                        book_pos.castle_wk | (book_pos.castle_wq << 1) | (book_pos.castle_bk << 2) | (book_pos.castle_bq << 3));
+                }
                 printf("bestmove %s\n", book_move);
                 fflush(stdout);
             } else {
@@ -1090,11 +1106,6 @@ int main(void) {
                     fflush(stdout);
                 } else {
                     Move best_calculated_move = find_best_move(&pos, ms, n);
-                    // Record the resulting position in history for repetition detection
-                    Pos after = make_move(&pos, best_calculated_move);
-                    if (g_pos_hash_count < 1024) {
-                        g_pos_hashes[g_pos_hash_count++] = compute_pos_hash(after.b, after.white_to_move);
-                    }
                     print_bestmove(best_calculated_move);
                 }
             }
